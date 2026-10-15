@@ -465,7 +465,9 @@ function afterRender(root, animate) {
 
 /* ---------- sheet (painel de baixo) ---------- */
 let sheetCtx = {};
+let sheetGen = 0;
 function openSheet(title, body, ctx = {}) {
+  sheetGen++;
   const root = $('#sheet-root');
   root.classList.remove('open');
   sheetCtx = ctx;
@@ -493,7 +495,8 @@ function closeSheet() {
   const root = $('#sheet-root');
   if (!root.innerHTML) return;
   root.classList.remove('open');
-  setTimeout(() => { if (!root.classList.contains('open')) root.innerHTML = ''; }, 450);
+  const gen = sheetGen;
+  setTimeout(() => { if (gen === sheetGen) root.innerHTML = ''; }, 450);
 }
 function enableDrag(sheet) {
   let y0 = null, dy = 0;
@@ -541,7 +544,10 @@ function billSheet(id, kind) {
       ${F.money('value', 0, true)}
       ${F.emoji(isFixo ? '🏠' : '📺')}
       <div class="fields-2">${F.text('name', 'Nome', '', isFixo ? 'Ex: Internet' : 'Ex: Netflix')}${F.num('day', 'Dia do vencimento', '', 'Ex: 10')}</div>
-      <div class="toggles">${F.toggle('alt', 'Revezo o pagamento', false, 'Pago um mês sim, um mês não')}</div>
+      <div class="toggles">
+        ${F.toggle('ask', 'Valor muda todo mês', false, 'Pergunta o valor quando der o check')}
+        ${F.toggle('alt', 'Revezo o pagamento', false, 'Pago um mês sim, um mês não')}
+      </div>
       ${F.btn('Adicionar', 'save-bill')}`, { kind });
     return;
   }
@@ -553,11 +559,21 @@ function billSheet(id, kind) {
     <div class="toggles">
       ${F.toggle('paid', 'Paguei', bm.paid)}
       ${F.toggle('notMe', 'Não fui eu que paguei', bm.notMe, 'Não entra nos gastos deste mês')}
+      ${F.toggle('ask', 'Valor muda todo mês', !!b.ask, 'Pergunta o valor quando der o check')}
       ${F.toggle('alt', 'Revezo o pagamento', !!b.alt, 'Mês sim, mês não — automático')}
     </div>
     ${F.more('Editar detalhes', `${F.emoji(b.icon)}<div class="fields-2">${F.text('name', 'Nome', b.name)}${F.num('day', 'Dia do vencimento', b.day || '')}</div>`)}
     ${F.btn('Salvar', 'save-bill')}
     ${F.danger('Remover', 'remove-bill')}`, { id });
+}
+
+function payBillSheet(id) {
+  const b = state.bills.find(x => x.id === id), m = ui.month;
+  const bm = billMonth(b, m);
+  openSheet(esc(b.name), `
+    <div class="sheet-hero"><div class="ico lg">${b.icon}</div><div><b>Quanto veio em ${monthName(m).toLowerCase()}?</b><small>Mês passado: ${fmt(billMonth(b, addM(m, -1)).value)}</small></div></div>
+    ${F.money('value', bm.value, true)}
+    ${F.btn(`${I.check} Paguei`, 'confirm-pay-bill')}`, { id });
 }
 
 function saveBill() {
@@ -566,6 +582,7 @@ function saveBill() {
   if (!sheetCtx.id) {
     const b = { id: uid(), kind: sheetCtx.kind, name: nameVal(sheetCtx.kind === 'fixo' ? 'Conta' : 'Assinatura'), icon: fv('icon').value, day: dayVal(), start: m, hist: [{ from: m, value }], months: {} };
     if (fv('alt').checked) b.alt = m;
+    if (fv('ask').checked) b.ask = true;
     state.bills.push(b);
     closeSheet(); commit(); toast('Adicionado ✓');
     return;
@@ -584,6 +601,7 @@ function saveBill() {
   if (altOn && !b.alt) b.alt = notMe ? addM(m, 1) : m;
   if (!altOn) delete b.alt;
   if (notMe !== altDefaultNotMe(b, m)) rec.notMe = notMe; else delete rec.notMe;
+  if (fv('ask').checked) b.ask = true; else delete b.ask;
   b.name = nameVal(b.name); b.icon = fv('icon').value; b.day = dayVal();
   if (!Object.keys(rec).some(k => rec[k] !== false && rec[k] !== undefined)) delete b.months[m];
   closeSheet(); commit(); toast('Salvo ✓');
@@ -598,6 +616,7 @@ function instSheet(id) {
     ${F.emoji(i?.icon || '💳')}
     ${F.text('name', 'O que foi', i?.name || '', 'Ex: iPhone, sofá…')}
     <div class="fields-2">${F.num('total', 'Total de parcelas', i?.total || '', 'Ex: 12')}${F.num('paid', 'Já paguei', i?.paid ?? '', 'Ex: 3')}</div>
+    ${F.num('now', `Parcela de ${monthName(ui.month).toLowerCase()}`, i ? instParcel(i, ui.month) || '' : '', 'Ex: 4 (deixe vazio = próxima)')}
     ${F.btn(i ? 'Salvar' : 'Adicionar', 'save-inst')}
     ${i ? F.danger('Remover', 'remove-inst') : ''}`, { id });
 }
@@ -607,8 +626,12 @@ function saveInst() {
   const paid = clamp(parseInt(fv('paid').value, 10) || 0, 0, total);
   if (!value) return toast('Coloque o valor da parcela');
   const data = { name: nameVal('Compra'), icon: fv('icon').value, value, total, paid };
+  // "Parcela deste mês" define quando a compra começou; vazio = a próxima depois das pagas.
+  const now = parseInt(fv('now').value, 10);
+  if (now >= 1 && now <= total) data.start = addM(ui.month, -(now - 1));
+  else if (!sheetCtx.id) data.start = addM(ui.month, -paid);
   if (sheetCtx.id) Object.assign(state.installments.find(x => x.id === sheetCtx.id), data);
-  else state.installments.push({ id: uid(), start: addM(ui.month, -paid), ...data });
+  else state.installments.push({ id: uid(), ...data });
   closeSheet(); commit(); toast('Salvo ✓');
 }
 
@@ -834,8 +857,18 @@ const A = {
   'toggle-bill': el => {
     const b = state.bills.find(x => x.id === el.dataset.id), m = ui.month;
     const rec = b.months[m] || (b.months[m] = {});
+    if (b.ask && !rec.paid) return payBillSheet(b.id);
     rec.paid = !rec.paid;
     animateCheck(el, b.id);
+  },
+  'confirm-pay-bill': () => {
+    const b = state.bills.find(x => x.id === sheetCtx.id), m = ui.month;
+    const rec = b.months[m] || (b.months[m] = {});
+    const value = parseMoney(fv('value').value);
+    if (value === histValue(b.hist, m)) delete rec.value; else rec.value = value;
+    rec.paid = true;
+    ui.pop = b.id;
+    closeSheet(); commit(); toast('Pago ✓');
   },
   'remove-bill': () => {
     const b = state.bills.find(x => x.id === sheetCtx.id), m = ui.month;
